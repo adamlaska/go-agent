@@ -8,7 +8,7 @@
 #   docker run utilization
 #
 
-FROM golang:1.7
+FROM golang:1.18beta2
 
 ENV GOPATH /tmp/gopath
 
