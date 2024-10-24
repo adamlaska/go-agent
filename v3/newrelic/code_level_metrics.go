@@ -90,6 +90,7 @@ type traceOptSet struct {
 	DemandCLM        bool
 	IgnoredPrefixes  []string
 	PathPrefixes     []string
+	LocationCallback func() *CodeLocation
 }
 
 //
@@ -106,9 +107,34 @@ type TraceOption func(*traceOptSet)
 // This is probably a value previously obtained by calling
 // ThisCodeLocation().
 //
+// Deprecated: This function requires the caller to do the work
+// up-front to calculate the code location, which may be a waste
+// of effort if code level metrics happens to be disabled. Instead,
+// use the WithCodeLocationCallback function.
+//
 func WithCodeLocation(loc *CodeLocation) TraceOption {
 	return func(o *traceOptSet) {
 		o.LocationOverride = loc
+	}
+}
+
+//
+// WithCodeLocationCallback adds a callback function which the agent
+// will call if it needs to report the code location with an explicit
+// value provided by the caller. This will only be called if code
+// level metrics is enabled, saving unnecessary work if those metrics
+// are not enabled.
+//
+// If the callback function value passed here is nil, then no callback
+// function will be used (same as if this function were never called).
+// If the callback function itself returns nil instead of a pointer to
+// a CodeLocation, then it is assumed the callback function was not able
+// to determine the code location, and the CLM reporting code's normal
+// method for determining the code location is used instead.
+//
+func WithCodeLocationCallback(locf func() *CodeLocation) TraceOption {
+	return func(o *traceOptSet) {
+		o.LocationCallback = locf
 	}
 }
 
@@ -129,7 +155,32 @@ func WithCodeLocation(loc *CodeLocation) TraceOption {
 //
 // If no prefix strings are passed here, the configured defaults will be used.
 //
+// Deprecated: New code should use WithIgnoredPrefixes instead.
+//
 func WithIgnoredPrefix(prefix ...string) TraceOption {
+	return func(o *traceOptSet) {
+		o.IgnoredPrefixes = prefix
+	}
+}
+
+//
+// WithIgnoredPrefixes indicates that the code location reported
+// for Code Level Metrics should be the first function in the
+// call stack that does not begin with the given string (or any of the given strings if more than one are given). This
+// string is matched against the entire fully-qualified function
+// name, which includes the name of the package the function
+// comes from. By default, the Go Agent tries to take the first
+// function on the call stack that doesn't seem to be internal to
+// the agent itself, but you can control this behavior using
+// this option.
+//
+// If all functions in the call stack begin with this prefix,
+// the outermost one will be used anyway, since we didn't find
+// anything better on the way to the bottom of the stack.
+//
+// If no prefix strings are passed here, the configured defaults will be used.
+//
+func WithIgnoredPrefixes(prefix ...string) TraceOption {
 	return func(o *traceOptSet) {
 		o.IgnoredPrefixes = prefix
 	}
@@ -141,7 +192,21 @@ func WithIgnoredPrefix(prefix ...string) TraceOption {
 // or more path prefixes to use for this trace only.
 // If no strings are given, the configured defaults will be used.
 //
+// Deprecated: New code should use WithPathPrefixes instead.
+//
 func WithPathPrefix(prefix ...string) TraceOption {
+	return func(o *traceOptSet) {
+		o.PathPrefixes = prefix
+	}
+}
+
+//
+// WithPathPrefixes overrides the list of source code path prefixes
+// used to trim source file pathnames, providing a new set of one
+// or more path prefixes to use for this trace only.
+// If no strings are given, the configured defaults will be used.
+//
+func WithPathPrefixes(prefix ...string) TraceOption {
 	return func(o *traceOptSet) {
 		o.PathPrefixes = prefix
 	}
@@ -346,6 +411,9 @@ func withPreparedOptions(newOptions *traceOptSet) TraceOption {
 			if newOptions.LocationOverride != nil {
 				o.LocationOverride = newOptions.LocationOverride
 			}
+			if newOptions.LocationCallback != nil {
+				o.LocationCallback = newOptions.LocationCallback
+			}
 			o.SuppressCLM = newOptions.SuppressCLM
 			o.DemandCLM = newOptions.DemandCLM
 			if newOptions.IgnoredPrefixes != nil {
@@ -503,9 +571,16 @@ func resolveCLMTraceOptions(options []TraceOption) *traceOptSet {
 
 func reportCodeLevelMetrics(tOpts traceOptSet, run *appRun, setAttr func(string, string, interface{})) {
 	var location CodeLocation
+	var locationp *CodeLocation
 
-	if tOpts.LocationOverride != nil {
-		location = *tOpts.LocationOverride
+	if tOpts.LocationCallback != nil {
+		locationp = tOpts.LocationCallback()
+	} else {
+		locationp = tOpts.LocationOverride
+	}
+
+	if locationp != nil {
+		location = *locationp
 	} else {
 		pcs := make([]uintptr, 20)
 		depth := runtime.Callers(2, pcs)
@@ -573,8 +648,18 @@ func reportCodeLevelMetrics(tOpts traceOptSet, run *appRun, setAttr func(string,
 		function = location.Function[ns+1:]
 	}
 
-	setAttr(AttributeCodeLineno, "", location.LineNo)
-	setAttr(AttributeCodeNamespace, namespace, nil)
-	setAttr(AttributeCodeFilepath, location.FilePath, nil)
-	setAttr(AttributeCodeFunction, function, nil)
+	// Impose data value size limits.
+	// Report no field over 255 characters in length.
+	// Report no CLM data at all if the function name is empty or >255 chars.
+	// Report no CLM data at all if both namespace and file path are >255 chars.
+	if function != "" && len(function) <= 255 && (len(namespace) <= 255 || len(location.FilePath) <= 255) {
+		setAttr(AttributeCodeLineno, "", location.LineNo)
+		setAttr(AttributeCodeFunction, function, nil)
+		if len(namespace) <= 255 {
+			setAttr(AttributeCodeNamespace, namespace, nil)
+		}
+		if len(location.FilePath) <= 255 {
+			setAttr(AttributeCodeFilepath, location.FilePath, nil)
+		}
+	}
 }

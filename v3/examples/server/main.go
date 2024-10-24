@@ -31,6 +31,13 @@ func noticeError(w http.ResponseWriter, r *http.Request) {
 	txn.NoticeError(errors.New("my error message"))
 }
 
+func noticeExpectedError(w http.ResponseWriter, r *http.Request) {
+	io.WriteString(w, "noticing an error")
+
+	txn := newrelic.FromContext(r.Context())
+	txn.NoticeExpectedError(errors.New("my expected error message"))
+}
+
 func noticeErrorWithAttributes(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, "noticing an error")
 
@@ -152,7 +159,7 @@ func message(w http.ResponseWriter, r *http.Request) {
 
 func external(w http.ResponseWriter, r *http.Request) {
 	txn := newrelic.FromContext(r.Context())
-	req, _ := http.NewRequest("GET", "http://example.com", nil)
+	req, _ := http.NewRequest("GET", "https://example.com", nil)
 
 	// Using StartExternalSegment is recommended because it does distributed
 	// tracing header setup, but if you don't have an *http.Request and
@@ -186,7 +193,7 @@ func roundtripper(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{}
 	client.Transport = newrelic.NewRoundTripper(client.Transport)
 
-	request, _ := http.NewRequest("GET", "http://example.com", nil)
+	request, _ := http.NewRequest("GET", "https://example.com", nil)
 	// Since the transaction is already added to the inbound request's
 	// context by WrapHandleFunc, we just need to copy the context from the
 	// inbound request to the external request.
@@ -273,6 +280,7 @@ func main() {
 	http.HandleFunc(newrelic.WrapHandleFunc(app, "/", index))
 	http.HandleFunc(newrelic.WrapHandleFunc(app, "/version", versionHandler))
 	http.HandleFunc(newrelic.WrapHandleFunc(app, "/notice_error", noticeError))
+	http.HandleFunc(newrelic.WrapHandleFunc(app, "/notice_expected_error", noticeExpectedError))
 	http.HandleFunc(newrelic.WrapHandleFunc(app, "/notice_error_with_attributes", noticeErrorWithAttributes))
 	http.HandleFunc(newrelic.WrapHandleFunc(app, "/custom_event", customEvent))
 	http.HandleFunc(newrelic.WrapHandleFunc(app, "/set_name", setName))

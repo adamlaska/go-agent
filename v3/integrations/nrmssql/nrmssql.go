@@ -1,9 +1,7 @@
 // Copyright 2020 New Relic Corporation. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// +build go1.10
-
-// Package nrmssql instruments github.com/denisenkom/go-mssqldb.
+// Package nrmssql instruments github.com/microsoft/go-mssqldb.
 //
 // Use this package to instrument your MSSQL calls without having to manually
 // create DatastoreSegments.  This is done in a two step process:
@@ -13,7 +11,7 @@
 // If your code is using sql.Open like this:
 //
 //	import (
-//		_ "github.com/denisenkom/go-mssqldb"
+//		_ "github.com/microsoft/go-mssqldb"
 //	)
 //
 //	func main() {
@@ -47,10 +45,11 @@ package nrmssql
 import (
 	"database/sql"
 	"fmt"
-	"github.com/denisenkom/go-mssqldb/msdsn"
-	"github.com/newrelic/go-agent/v3/internal"
 
-	"github.com/denisenkom/go-mssqldb"
+	mssql "github.com/microsoft/go-mssqldb"
+	"github.com/microsoft/go-mssqldb/msdsn"
+
+	"github.com/newrelic/go-agent/v3/internal"
 	"github.com/newrelic/go-agent/v3/newrelic"
 	"github.com/newrelic/go-agent/v3/newrelic/sqlparse"
 )
@@ -71,7 +70,7 @@ func init() {
 }
 
 func parseDSN(s *newrelic.DatastoreSegment, dsn string) {
-	cfg, _, err := msdsn.Parse(dsn)
+	cfg, err := msdsn.Parse(dsn)
 	if nil != err {
 		return
 	}

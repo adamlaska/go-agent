@@ -24,7 +24,7 @@ Before submitting an Issue, please search for similar ones in the
 
 ## Pull Requests
 
-Pull requests must pass all automated tests and must be reviewed by at least one maintaining engineer before being merged.
+Pull requests must pass all automated tests and must be reviewed by at least one maintaining engineer before being merged. Please contribute all pull requests against the `develop` branch, which is where we stage changes ahead of a release and run our most complete suite of tests.
 
 When contributing a new integration package, please follow the [Writing a New Integration Package](https://github.com/newrelic/go-agent/wiki/Writing-a-New-Integration-Package) wiki page.
 
@@ -37,4 +37,4 @@ For more information about CLAs, please check out Alex Russell’s excellent pos
 
 ## Slack
 
-We host a public Slack with a dedicated channel for contributors and maintainers of open source projects hosted by New Relic.  If you are contributing to this project, you're welcome to request access to the #oss-contributors channel in the newrelicusers.slack.com workspace.  To request access, see https://newrelicusers-signup.herokuapp.com/.
+We host a public Slack with a dedicated channel for contributors and maintainers of open source projects hosted by New Relic.  If you are contributing to this project, you're welcome to request access to the #oss-contributors channel in the newrelicusers.slack.com workspace.  To request access, please use this [link](https://join.slack.com/t/newrelicusers/shared_invite/zt-1ayj69rzm-~go~Eo1whIQGYnu3qi15ng).

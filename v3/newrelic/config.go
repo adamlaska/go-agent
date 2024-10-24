@@ -101,6 +101,11 @@ type Config struct {
 		// greater than or equal to 400 or less than 100 -- with the exception
 		// of 0, 5, and 404 -- are turned into errors.
 		IgnoreStatusCodes []int
+		// ExpectStatusCodes controls which http response codes should
+		// impact your error metrics, apdex score and alerts. Expected errors will
+		// be silently captured without impacting any of those. Note that setting an error
+		// code as Ignored will prevent it from being collected, even if its expected.
+		ExpectStatusCodes []int
 		// Attributes controls the attributes included with errors.
 		Attributes AttributeDestinationConfig
 		// RecordPanics controls whether or not a deferred
@@ -108,6 +113,24 @@ type Config struct {
 		// as errors, and then re-panic them.  By default, this is
 		// set to false.
 		RecordPanics bool
+		// ErrorGroupCallback is a user defined callback function that takes an error as an input
+		// and returns a string that will be applied to an error to put it in an error group.
+		//
+		// If no error group is identified for a given error, this function should return an empty string.
+		// If an ErrorGroupCallbeck is defined, it will be executed against every error the go agent notices that
+		// is not ignored.
+		//
+		// example function:
+		//
+		// func ErrorGroupCallback(errorInfo newrelic.ErrorInfo) string {
+		//		if errorInfo.Class == "403" && errorInfo.GetUserId() == "example user" {
+		//			return "customer X payment issue"
+		// 		}
+		//
+		//		// returning empty string causes default error grouping behavior
+		//		return ""
+		// }
+		ErrorGroupCallback `json:"-"`
 	}
 
 	// TransactionTracer controls the capture of transaction traces.
@@ -212,6 +235,17 @@ type Config struct {
 		DynoNamePrefixesToShorten []string
 	}
 
+	// AIMonitoring controls the behavior of AI monitoring features.
+	AIMonitoring struct {
+		Enabled bool
+		// Indicates whether streams will be instrumented
+		Streaming struct {
+			Enabled bool
+		}
+		RecordContent struct {
+			Enabled bool
+		}
+	}
 	// CrossApplicationTracer controls behavior relating to cross application
 	// tracing (CAT).  In the case where CrossApplicationTracer and
 	// DistributedTracer are both enabled, DistributedTracer takes precedence.
@@ -293,6 +327,10 @@ type Config struct {
 		QueryParameters struct {
 			Enabled bool
 		}
+		RawQuery struct {
+			Enabled bool
+		}
+
 		// SlowQuery controls the capture of slow query traces.  Slow
 		// query traces show you instances of your slowest datastore
 		// segments.
@@ -360,6 +398,12 @@ type Config struct {
 		// as attributes. If this is disabled, no such metrics will be collected
 		// or reported.
 		Enabled bool
+		// RedactPathPrefixes, if true, will redact a non-nil list of PathPrefixes
+		// from the configuration data transmitted by the agent.
+		RedactPathPrefixes bool
+		// RedactIgnoredPrefixes, if true, will redact a non-nil list of IgnoredPrefixes
+		// from the configuration data transmitted by the agent.
+		RedactIgnoredPrefixes bool
 		// Scope is a combination of CodeLevelMetricsScope values OR-ed together
 		// to indicate which specific kinds of events will carry CodeLevelMetrics
 		// data. This allows the agent to spend resources on discovering the source
@@ -401,21 +445,36 @@ type Config struct {
 		// names look like they are internal to the agent itself.
 		IgnoredPrefixes []string
 	}
+
+	// ModuleDependencyMetrics controls reporting of the packages used to build the instrumented
+	// application, to help manage project dependencies.
+	ModuleDependencyMetrics struct {
+		// Enabled controls whether the module dependencies are collected and reported.
+		Enabled bool
+		// RedactIgnoredPrefixes, if true, redacts a non-nil list of IgnoredPrefixes from
+		// the configuration data transmitted by the agent.
+		RedactIgnoredPrefixes bool
+		// IgnoredPrefixes is a list of module path prefixes. Any module whose import pathname
+		// begins with one of these prefixes is excluded from the dependency reporting.
+		// This list of ignored prefixes itself is not reported outside the agent.
+		IgnoredPrefixes []string
+	}
+	// Security is used to post security configuration on UI.
+	Security interface{} `json:"Security,omitempty"`
 }
 
-//
 // CodeLevelMetricsScope is a bit-encoded value. Each such value describes
 // a trace type for which code-level metrics are to be collected and
 // reported.
-//
 type CodeLevelMetricsScope uint32
 
 // These constants specify the types of telemetry data to which we will
 // attach code level metric data.
 //
 // Currently, this includes
-//    TransactionCLM            any kind of transaction
-//    AllCLM                    all kinds of telemetry data for which CLM is implemented (the default)
+//
+//	TransactionCLM            any kind of transaction
+//	AllCLM                    all kinds of telemetry data for which CLM is implemented (the default)
 //
 // The zero value of CodeLevelMetricsScope means "all types" as a convenience so that
 // new variables of this type provide the default expected behavior
@@ -429,7 +488,6 @@ const (
 	AllCLM         CodeLevelMetricsScope = 0
 )
 
-//
 // CodeLevelMetricsScopeLabelToValue accepts a number of string values representing
 // the possible scope restrictions available for the agent, returning the
 // CodeLevelMetricsScope value which represents the combination of all of the given
@@ -441,9 +499,9 @@ const (
 // will represent any valid label strings passed, if any).
 //
 // Currently, this function recognizes the following labels:
-//   for AllCLM: "all" (if this value appears anywhere in the list of strings, AllCLM will be returned)
-//   for TransactionCLM: "transaction", "transactions", "txn"
 //
+//	for AllCLM: "all" (if this value appears anywhere in the list of strings, AllCLM will be returned)
+//	for TransactionCLM: "transaction", "transactions", "txn"
 func CodeLevelMetricsScopeLabelToValue(labels ...string) (CodeLevelMetricsScope, bool) {
 	var scope CodeLevelMetricsScope
 	ok := true
@@ -465,10 +523,8 @@ func CodeLevelMetricsScopeLabelToValue(labels ...string) (CodeLevelMetricsScope,
 	return scope, ok
 }
 
-//
 // UnmarshalText allows for a CodeLevelMetricsScope value to be read from a JSON
 // string (or other text encodings) whose value is a comma-separated list of scope labels.
-//
 func (s *CodeLevelMetricsScope) UnmarshalText(b []byte) error {
 	var ok bool
 
@@ -479,10 +535,8 @@ func (s *CodeLevelMetricsScope) UnmarshalText(b []byte) error {
 	return nil
 }
 
-//
 // MarshalText allows for a CodeLevelMetrics value to be encoded into JSON strings and other
 // text encodings.
-//
 func (s CodeLevelMetricsScope) MarshalText() ([]byte, error) {
 	if s == 0 || s == AllCLM {
 		return []byte("all"), nil
@@ -495,12 +549,10 @@ func (s CodeLevelMetricsScope) MarshalText() ([]byte, error) {
 	return nil, fmt.Errorf("unrecognized bit pattern in CodeLevelMetricsScope value")
 }
 
-//
 // CodeLevelMetricsScopeLabelListToValue is a convenience function which
 // is like CodeLevelMetricsScopeLabeltoValue except that it takes a single
 // string which contains comma-separated values instead of an already-broken-out
 // set of individual label strings.
-//
 func CodeLevelMetricsScopeLabelListToValue(labels string) (CodeLevelMetricsScope, bool) {
 	return CodeLevelMetricsScopeLabelToValue(strings.Split(labels, ",")...)
 }
@@ -529,6 +581,15 @@ type ApplicationLogging struct {
 	LocalDecorating struct {
 		// Toggles whether the agent enriches local logs printed to console so they can be sent to new relic for ingestion
 		Enabled bool
+	}
+	// We want to enable this when your app collects fewer logs, or if your app can afford to compile the json
+	// during log collection, slowing down the execution of the line of code that will write the log. If your
+	// application collects logs at a high frequency or volume, or it can not afford the slowdown of marshaling objects
+	// before sending them to new relic, we can marshal them asynchronously in the backend during harvests by setting
+	// this to false using ConfigZapAttributesEncoder(false).
+	ZapLogger struct {
+		// Toggles whether zap logger field attributes are frontloaded with the zapcore.NewMapObjectEncoder or marshalled at harvest time
+		AttributesFrontloaded bool
 	}
 }
 
@@ -598,18 +659,18 @@ func defaultConfig() Config {
 
 	// Application Logging Settings
 	c.ApplicationLogging.Enabled = true
-	c.ApplicationLogging.Forwarding.Enabled = false
+	c.ApplicationLogging.Forwarding.Enabled = true
 	c.ApplicationLogging.Forwarding.MaxSamplesStored = internal.MaxLogEvents
 	c.ApplicationLogging.Metrics.Enabled = true
 	c.ApplicationLogging.LocalDecorating.Enabled = false
-
+	c.ApplicationLogging.ZapLogger.AttributesFrontloaded = true
 	c.BrowserMonitoring.Enabled = true
 	// browser monitoring attributes are disabled by default
 	c.BrowserMonitoring.Attributes.Enabled = false
 
 	c.CrossApplicationTracer.Enabled = false
 	c.DistributedTracer.Enabled = true
-	c.DistributedTracer.ReservoirLimit = defaultMaxSpanEvents
+	c.DistributedTracer.ReservoirLimit = internal.MaxSpanEvents
 	c.SpanEvents.Enabled = true
 	c.SpanEvents.Attributes.Enabled = true
 
@@ -618,6 +679,7 @@ func defaultConfig() Config {
 	c.DatastoreTracer.QueryParameters.Enabled = true
 	c.DatastoreTracer.SlowQuery.Enabled = true
 	c.DatastoreTracer.SlowQuery.Threshold = 10 * time.Millisecond
+	c.DatastoreTracer.RawQuery.Enabled = false
 
 	c.ServerlessMode.ApdexThreshold = 500 * time.Millisecond
 	c.ServerlessMode.Enabled = false
@@ -625,12 +687,21 @@ func defaultConfig() Config {
 	c.Heroku.UseDynoNames = true
 	c.Heroku.DynoNamePrefixesToShorten = []string{"scheduler", "run"}
 
+	c.AIMonitoring.Enabled = false
+	c.AIMonitoring.Streaming.Enabled = true
+	c.AIMonitoring.RecordContent.Enabled = true
 	c.InfiniteTracing.TraceObserver.Port = 443
 	c.InfiniteTracing.SpanEvents.QueueSize = 10000
 
 	// Code Level Metrics
-	c.CodeLevelMetrics.Enabled = false
+	c.CodeLevelMetrics.Enabled = true
+	c.CodeLevelMetrics.RedactPathPrefixes = true
+	c.CodeLevelMetrics.RedactIgnoredPrefixes = true
 	c.CodeLevelMetrics.Scope = AllCLM
+
+	// Module Dependency Metrics
+	c.ModuleDependencyMetrics.Enabled = true
+	c.ModuleDependencyMetrics.RedactIgnoredPrefixes = true
 	return c
 }
 
@@ -661,16 +732,16 @@ func (c Config) validate() error {
 			return errLicenseLen
 		}
 	}
-	if "" == c.AppName && c.Enabled && !c.ServerlessMode.Enabled {
+	if c.AppName == "" && c.Enabled && !c.ServerlessMode.Enabled {
 		return errAppNameMissing
 	}
-	if c.HighSecurity && "" != c.SecurityPoliciesToken {
+	if c.HighSecurity && c.SecurityPoliciesToken != "" {
 		return errHighSecurityWithSecurityPolicies
 	}
 	if strings.Count(c.AppName, ";") >= appNameLimit {
 		return errAppNameLimit
 	}
-	if "" != c.InfiniteTracing.TraceObserver.Host && c.ServerlessMode.Enabled {
+	if c.InfiniteTracing.TraceObserver.Host != "" && c.ServerlessMode.Enabled {
 		return errInfTracingServerless
 	}
 
@@ -679,7 +750,7 @@ func (c Config) validate() error {
 
 func (c Config) validateTraceObserverConfig() (*observerURL, error) {
 	configHost := c.InfiniteTracing.TraceObserver.Host
-	if "" == configHost {
+	if configHost == "" {
 		// This is the only instance from which we can return nil, nil.
 		// If the user requests use of a trace observer, we must either provide
 		// them with a valid observerURL _or_ alert them to the failure to do so.
@@ -748,7 +819,7 @@ func copyConfigReferenceFields(cfg Config) Config {
 			cp.Labels[key] = val
 		}
 	}
-	if nil != cfg.ErrorCollector.IgnoreStatusCodes {
+	if cfg.ErrorCollector.IgnoreStatusCodes != nil {
 		ignored := make([]int, len(cfg.ErrorCollector.IgnoreStatusCodes))
 		copy(ignored, cfg.ErrorCollector.IgnoreStatusCodes)
 		cp.ErrorCollector.IgnoreStatusCodes = ignored
@@ -797,12 +868,12 @@ func (s settings) MarshalJSON() ([]byte, error) {
 	c.Logger = nil
 
 	js, err := json.Marshal(c)
-	if nil != err {
+	if err != nil {
 		return nil, err
 	}
 	fields := make(map[string]interface{})
 	err = json.Unmarshal(js, &fields)
-	if nil != err {
+	if err != nil {
 		return nil, err
 	}
 	// The License field is not simply ignored by adding the `json:"-"` tag
@@ -814,6 +885,28 @@ func (s settings) MarshalJSON() ([]byte, error) {
 	// Browser monitoring support.
 	if c.BrowserMonitoring.Enabled {
 		fields[`browser_monitoring.loader`] = "rum"
+	}
+
+	// Protect privacy for restricted fields
+	if clmConfig, ok := fields["CodeLevelMetrics"]; ok {
+		if clmMap, ok := clmConfig.(map[string]interface{}); ok {
+			if c.CodeLevelMetrics.RedactIgnoredPrefixes && c.CodeLevelMetrics.IgnoredPrefixes != nil {
+				delete(clmMap, "IgnoredPrefixes")
+				delete(clmMap, "IgnoredPrefix")
+			}
+			if c.CodeLevelMetrics.RedactPathPrefixes && c.CodeLevelMetrics.PathPrefixes != nil {
+				delete(clmMap, "PathPrefixes")
+				delete(clmMap, "PathPrefix")
+			}
+		}
+	}
+
+	if mdmConfig, ok := fields["ModuleDependencyMetrics"]; ok {
+		if mdmMap, ok := mdmConfig.(map[string]interface{}); ok {
+			if c.ModuleDependencyMetrics.RedactIgnoredPrefixes && c.ModuleDependencyMetrics.IgnoredPrefixes != nil {
+				delete(mdmMap, "IgnoredPrefixes")
+			}
+		}
 	}
 
 	return json.Marshal(fields)
@@ -968,7 +1061,7 @@ func newInternalConfig(cfg Config, getenv func(string) string, environ []string)
 }
 
 func (c config) createConnectJSON(securityPolicies *internal.SecurityPolicies) ([]byte, error) {
-	env := newEnvironment()
+	env := newEnvironment(&c)
 	util := utilization.Gather(utilization.Config{
 		DetectAWS:         c.Utilization.DetectAWS,
 		DetectAzure:       c.Utilization.DetectAzure,
@@ -990,7 +1083,7 @@ var (
 )
 
 func (c config) preconnectHost() string {
-	if "" != c.Host {
+	if c.Host != "" {
 		return c.Host
 	}
 	m := preconnectRegionLicenseRegex.FindStringSubmatch(c.License)
