@@ -35,6 +35,8 @@ type txnEvent struct {
 	externalDuration   time.Duration
 	datastoreCallCount uint64
 	datastoreDuration  time.Duration
+	errGroupCallback   ErrorGroupCallback
+	TxnID              string
 }
 
 // betterCAT stores the transaction's priority and all fields related
@@ -61,23 +63,47 @@ func (bc *betterCAT) SetTraceAndTxnIDs(traceID string) {
 	}
 }
 
+func (e *txnEvent) SetTransactionID(transactionID string) {
+	txnLength := 16
+	if len(transactionID) <= txnLength {
+		e.TxnID = transactionID
+	} else {
+		e.TxnID = transactionID[:txnLength]
+	}
+
+}
+
 // txnData contains the recorded data of a transaction.
 type txnData struct {
-	txnEvent
-	IsWeb          bool
-	Name           string    // Work in progress name.
-	Errors         txnErrors // Lazily initialized.
-	Stop           time.Time
-	ApdexThreshold time.Duration
+	IsWeb              bool
+	SlowQueriesEnabled bool
+	noticeErrors       bool // If errors are not expected or ignored, then true
+	expectedErrors     bool
 
 	stamp           segmentStamp
 	threadIDCounter uint64
 
+	Name       string // Work in progress name.
+	rootSpanID string
+
+	txnEvent
+	TxnTrace txnTrace
+
+	Stop               time.Time
+	ApdexThreshold     time.Duration
+	SlowQueryThreshold time.Duration
+
+	SlowQueries *slowQueries
+
+	// These better CAT supportability fields are left outside of
+	// TxnEvent.BetterCAT to minimize the size of transaction event memory.
+	DistributedTracingSupport distributedTracingSupport
+
 	TraceIDGenerator        *internal.TraceIDGenerator
 	ShouldCollectSpanEvents func() bool
 	ShouldCreateSpanGUID    func() bool
-	rootSpanID              string
 	rootSpanErrData         *errorData
+	Errors                  txnErrors // Lazily initialized.
 	SpanEvents              []*spanEvent
 	logs                    logEventHeap
 
@@ -85,16 +111,6 @@ type txnData struct {
 	datastoreSegments map[datastoreMetricKey]*metricData
 	externalSegments  map[externalMetricKey]*metricData
 	messageSegments   map[internal.MessageMetricKey]*metricData
-
-	TxnTrace txnTrace
-
-	SlowQueriesEnabled bool
-	SlowQueryThreshold time.Duration
-	SlowQueries        *slowQueries
-
-	// These better CAT supportability fields are left outside of
-	// TxnEvent.BetterCAT to minimize the size of transaction event memory.
-	DistributedTracingSupport distributedTracingSupport
 }
 
 func (t *txnData) saveTraceSegment(end segmentEnd, name string, attrs spanAttributeMap, externalGUID string) {
@@ -243,7 +259,7 @@ func (m *spanAttributeMap) addAgentAttrs(attrs agentAttributes) {
 	}
 }
 
-func addAttr(m *spanAttributeMap, key string, val interface{}) {
+func addAttr(m *spanAttributeMap, key string, val any) {
 	switch v := val.(type) {
 	case string:
 		m.addString(key, v)
@@ -320,9 +336,19 @@ const (
 	datastoreOperationUnknown = "other"
 )
 
+// NoticeErrors indicates whether the errors collected count towards error/ metrics
+func (t *txnData) NoticeErrors() bool {
+	return t.noticeErrors
+}
+
 // HasErrors indicates whether the transaction had errors.
 func (t *txnData) HasErrors() bool {
 	return len(t.Errors) > 0
+}
+
+// HasExpectedErrors is a special case where the txn has errors but we dont increment error metrics
+func (t *txnData) HasExpectedErrors() bool {
+	return t.expectedErrors
 }
 
 func (t *txnData) time(now time.Time) segmentTime {
@@ -342,7 +368,7 @@ func (thread *tracingThread) AddAgentSpanAttribute(key string, val string) {
 }
 
 // AddUserSpanAttribute allows custom attributes to be added to spans.
-func (thread *tracingThread) AddUserSpanAttribute(key string, val interface{}) {
+func (thread *tracingThread) AddUserSpanAttribute(key string, val any) {
 	if len(thread.stack) > 0 {
 		userAttributes := &thread.stack[len(thread.stack)-1].userAttributes
 		userAttributes.addUserAttrs(map[string]userAttribute{
@@ -399,7 +425,7 @@ func (t *txnData) CurrentSpanIdentifier(thread *tracingThread) string {
 
 func (t *txnData) saveSpanEvent(e *spanEvent) {
 	e.AgentAttributes = t.Attrs.filterSpanAttributes(e.AgentAttributes, destSpan)
-	if len(t.SpanEvents) < defaultMaxSpanEvents {
+	if len(t.SpanEvents) < internal.MaxSpanEvents {
 		t.SpanEvents = append(t.SpanEvents, e)
 	}
 }
@@ -550,7 +576,7 @@ func endExternalSegment(p endExternalParams) error {
 		appData, err = t.CrossProcess.ParseAppData(hdr)
 		if err != nil {
 			if p.Logger.DebugEnabled() {
-				p.Logger.Debug("failure to parse cross application response header", map[string]interface{}{
+				p.Logger.Debug("failure to parse cross application response header", map[string]any{
 					"err":    err.Error(),
 					"header": hdr,
 				})
@@ -684,7 +710,7 @@ type endDatastoreParams struct {
 	Collection         string
 	Operation          string
 	ParameterizedQuery string
-	QueryParameters    map[string]interface{}
+	QueryParameters    map[string]any
 	Host               string
 	PortPathOrID       string
 	Database           string

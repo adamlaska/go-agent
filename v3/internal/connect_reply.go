@@ -100,6 +100,7 @@ type ConnectReply struct {
 		TransactionTracerStackTraceThreshold *float64    `json:"transaction_tracer.stack_trace_threshold"`
 		ErrorCollectorEnabled                *bool       `json:"error_collector.enabled"`
 		ErrorCollectorIgnoreStatusCodes      []int       `json:"error_collector.ignore_status_codes"`
+		ErrorCollectorExpectStatusCodes      []int       `json:"error_collector.expected_status_codes"`
 		CrossApplicationTracerEnabled        *bool       `json:"cross_application_tracer.enabled"`
 	} `json:"agent_config"`
 
@@ -228,9 +229,9 @@ const (
 // consumer.
 func CreateFullTxnName(input string, reply *ConnectReply, isWeb bool) string {
 	var afterURLRules string
-	if "" != input {
+	if input != "" {
 		afterURLRules = reply.URLRules.Apply(input)
-		if "" == afterURLRules {
+		if afterURLRules == "" {
 			return ""
 		}
 	}
@@ -248,11 +249,45 @@ func CreateFullTxnName(input string, reply *ConnectReply, isWeb bool) string {
 	}
 
 	afterNameRules := reply.TxnNameRules.Apply(beforeNameRules)
-	if "" == afterNameRules {
+	if afterNameRules == "" {
 		return ""
 	}
 
 	return reply.SegmentTerms.apply(afterNameRules)
+}
+
+// RequestEventLimits sets limits for reservior testing
+type RequestEventLimits struct {
+	CustomEvents int
+}
+
+const (
+	// CustomEventHarvestsPerMinute is the number of times per minute custom events are harvested
+	CustomEventHarvestsPerMinute = 5
+)
+
+// IsConnectedToNewRelic returns true if the connect reply is a valid connect reply
+// from a New Relic connect endpoint. This is determined by the presence of a RunID
+// and an EntityGUID which the agent needs to send data to a collector.
+func (r *ConnectReply) IsConnectedToNewRelic() bool {
+	return r != nil && r.RunID != "" && r.EntityGUID != ""
+}
+
+// MockConnectReplyEventLimits sets up a mock connect reply to test event limits
+// currently only verifies custom insights events
+func (r *ConnectReply) MockConnectReplyEventLimits(limits *RequestEventLimits) {
+	r.SetSampleEverything()
+
+	r.EventData.Limits.CustomEvents = uintPtr(uint(limits.CustomEvents) / (60 / CustomEventHarvestsPerMinute))
+
+	// The mock server will be limited to a maximum of 100,000 events per minute
+	if limits.CustomEvents > 100000 {
+		r.EventData.Limits.CustomEvents = uintPtr(uint(100000) / (60 / CustomEventHarvestsPerMinute))
+	}
+
+	if limits.CustomEvents <= 0 {
+		r.EventData.Limits.CustomEvents = uintPtr(uint(0) / (60 / CustomEventHarvestsPerMinute))
+	}
 }
 
 // SetSampleEverything is used for testing to ensure span events get saved.

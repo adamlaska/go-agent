@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 
@@ -567,6 +568,46 @@ func TestNilTransaction(t *testing.T) {
 	}
 }
 
+func TestGetName(t *testing.T) {
+	replyfn := func(reply *internal.ConnectReply) {
+		reply.SetSampleEverything()
+		reply.EntityGUID = "entities-are-guid"
+		reply.TraceIDGenerator = internal.NewTraceIDGenerator(12345)
+	}
+	cfgfn := func(cfg *Config) {
+		cfg.AppName = "app-name"
+		cfg.DistributedTracer.Enabled = true
+	}
+	app := testApp(replyfn, cfgfn, t)
+	txn := app.StartTransaction("hello")
+	defer txn.End()
+	txn.Ignore()
+	txn.SetName("hello世界")
+	if theName := txn.Name(); theName != "hello世界" {
+		t.Error(theName)
+	}
+}
+
+func TestIgnoreTransaction(t *testing.T) {
+	replyfn := func(reply *internal.ConnectReply) {
+		reply.SetSampleEverything()
+		reply.EntityGUID = "entities-are-guid"
+		reply.TraceIDGenerator = internal.NewTraceIDGenerator(12345)
+	}
+	cfgfn := func(cfg *Config) {
+		cfg.AppName = "app-name"
+		cfg.DistributedTracer.Enabled = true
+	}
+	app := testApp(replyfn, cfgfn, t)
+	txn := app.StartTransaction("hello")
+	txn.Ignore()
+	txn.SetName("hello世界")
+	txn.NoticeError(errors.New("hi"))
+	txn.End()
+
+	app.ExpectTxnTraces(t, []internal.WantTxnTrace{})
+}
+
 func TestEmptyTransaction(t *testing.T) {
 	txn := &Transaction{}
 
@@ -930,6 +971,42 @@ func TestErrAttrsAddedWhenPanic(t *testing.T) {
 			AgentAttributes: map[string]interface{}{
 				SpanAttributeErrorClass:   "panic",
 				SpanAttributeErrorMessage: "whoopsidoodle",
+			},
+			Intrinsics: map[string]interface{}{
+				"category":         internal.MatchAnything,
+				"timestamp":        internal.MatchAnything,
+				"name":             "OtherTransaction/Go/hello",
+				"transaction.name": "OtherTransaction/Go/hello",
+				"nr.entryPoint":    true,
+			},
+		},
+	})
+}
+
+func TestPanicNilRecovery(t *testing.T) {
+	cfgFnRecordPanics := func(cfg *Config) {
+		cfg.DistributedTracer.Enabled = true
+		cfg.ErrorCollector.RecordPanics = true
+	}
+	app := testApp(replyFn, cfgFnRecordPanics, t)
+	func() {
+		defer func() {
+			recovered := recover()
+			if recovered == nil {
+				t.Error("code did not panic as expected")
+			} else if _, isNil := recovered.(*runtime.PanicNilError); !isNil {
+				t.Errorf("code did not panic with nil as expected; got %v (type %T) instead", recovered, recovered)
+			}
+		}()
+		txn := app.StartTransaction("hello")
+		defer txn.End()
+		panic(nil)
+	}()
+	app.ExpectSpanEvents(t, []internal.WantEvent{
+		{
+			AgentAttributes: map[string]interface{}{
+				SpanAttributeErrorClass:   "panic",
+				SpanAttributeErrorMessage: "panic called with nil argument",
 			},
 			Intrinsics: map[string]interface{}{
 				"category":         internal.MatchAnything,

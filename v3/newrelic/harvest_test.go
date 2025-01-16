@@ -167,7 +167,7 @@ func TestCreateFinalMetrics(t *testing.T) {
 		{Name: "Supportability/EventHarvest/AnalyticEventData/HarvestLimit", Scope: "", Forced: true, Data: []float64{1, 10 * 1000, 10 * 1000, 10 * 1000, 10 * 1000, 10 * 1000 * 10 * 1000}},
 		{Name: "Supportability/EventHarvest/CustomEventData/HarvestLimit", Scope: "", Forced: true, Data: []float64{1, internal.MaxCustomEvents, internal.MaxCustomEvents, internal.MaxCustomEvents, internal.MaxCustomEvents, internal.MaxCustomEvents * internal.MaxCustomEvents}},
 		{Name: "Supportability/EventHarvest/ErrorEventData/HarvestLimit", Scope: "", Forced: true, Data: []float64{1, 100, 100, 100, 100, 100 * 100}},
-		{Name: "Supportability/EventHarvest/SpanEventData/HarvestLimit", Scope: "", Forced: true, Data: []float64{1, 2000, 2000, 2000, 2000, 2000 * 2000}},
+		{Name: "Supportability/EventHarvest/SpanEventData/HarvestLimit", Scope: "", Forced: true, Data: []float64{1, internal.MaxSpanEvents, internal.MaxSpanEvents, internal.MaxSpanEvents, internal.MaxSpanEvents, internal.MaxSpanEvents * internal.MaxSpanEvents}},
 		{Name: "Supportability/EventHarvest/LogEventData/HarvestLimit", Scope: "", Forced: true, Data: []float64{1, 10000, 10000, 10000, 10000, 10000 * 10000}},
 		{Name: "Supportability/Go/Version/" + Version, Scope: "", Forced: true, Data: []float64{1, 0, 0, 0, 0, 0}},
 		{Name: "Supportability/Go/Runtime/Version/" + goVersionSimple, Scope: "", Forced: true, Data: []float64{1, 0, 0, 0, 0, 0}},
@@ -315,6 +315,7 @@ func TestHarvestLogEventsReady(t *testing.T) {
 	})
 
 	logEvent := logEvent{
+		nil,
 		0.5,
 		123456,
 		"INFO",
@@ -415,7 +416,7 @@ func TestHarvestErrorEventsReady(t *testing.T) {
 	})
 	h.ErrorEvents.Add(&errorEvent{
 		errorData: errorData{Klass: "klass", Msg: "msg", When: time.Now()},
-		txnEvent:  txnEvent{FinalName: "finalName", Duration: 1 * time.Second},
+		txnEvent:  txnEvent{FinalName: "finalName", Duration: 1 * time.Second, TxnID: "txn-guid-id"},
 	}, 0)
 	ready := h.Ready(now.Add(10 * time.Second))
 	payloads := ready.Payloads(true)
@@ -509,7 +510,7 @@ func TestHarvestMetricsTracesReady(t *testing.T) {
 
 	ers := newTxnErrors(10)
 	ers.Add(errorData{When: time.Now(), Msg: "msg", Klass: "klass", Stack: getStackTrace()})
-	mergeTxnErrors(&h.ErrorTraces, ers, txnEvent{FinalName: "finalName", Attrs: nil})
+	mergeTxnErrors(&h.ErrorTraces, ers, txnEvent{FinalName: "finalName", Attrs: nil}, nil)
 
 	h.TxnTraces.Witness(harvestTrace{
 		txnEvent: txnEvent{
@@ -544,6 +545,7 @@ func TestHarvestMetricsTracesReady(t *testing.T) {
 		TxnName: "finalName",
 		Msg:     "msg",
 		Klass:   "klass",
+		GUID:    "error-guid-id",
 	}})
 	expectErrors(t, h.ErrorTraces, []internal.WantError{})
 
@@ -575,6 +577,7 @@ func TestMergeFailedHarvest(t *testing.T) {
 	}, 0)
 
 	logEvent := logEvent{
+		nil,
 		0.5,
 		123456,
 		"INFO",
@@ -612,7 +615,7 @@ func TestMergeFailedHarvest(t *testing.T) {
 	mergeTxnErrors(&h.ErrorTraces, ers, txnEvent{
 		FinalName: "finalName",
 		Attrs:     nil,
-	})
+	}, nil)
 	h.SpanEvents.addEventPopulated(&sampleSpanEvent)
 
 	if start1 != h.Metrics.metricPeriodStart {
@@ -771,6 +774,7 @@ func TestCreateTxnMetrics(t *testing.T) {
 	webName := "WebTransaction/zip/zap"
 	backgroundName := "OtherTransaction/zip/zap"
 	args := &txnData{}
+	args.noticeErrors = true
 	args.Duration = 123 * time.Second
 	args.TotalTime = 150 * time.Second
 	args.ApdexThreshold = 2 * time.Second
@@ -803,6 +807,7 @@ func TestCreateTxnMetrics(t *testing.T) {
 	args.FinalName = webName
 	args.IsWeb = true
 	args.Errors = nil
+	args.noticeErrors = false
 	args.Zone = apdexTolerating
 	metrics = newMetricTable(100, time.Now())
 	createTxnMetrics(args, metrics)
@@ -821,6 +826,7 @@ func TestCreateTxnMetrics(t *testing.T) {
 	args.FinalName = backgroundName
 	args.IsWeb = false
 	args.Errors = txnErrors
+	args.noticeErrors = true
 	args.Zone = apdexNone
 	metrics = newMetricTable(100, time.Now())
 	createTxnMetrics(args, metrics)
@@ -838,9 +844,32 @@ func TestCreateTxnMetrics(t *testing.T) {
 		{Name: "ErrorsByCaller/Unknown/Unknown/Unknown/Unknown/allOther", Scope: "", Forced: false, Data: []float64{1, 0, 0, 0, 0, 0}},
 	})
 
+	// Verify expected errors metrics
+	args.FinalName = backgroundName
+	args.IsWeb = false
+	args.Errors = txnErrors
+	args.noticeErrors = false
+	args.expectedErrors = true
+	args.Zone = apdexNone
+	metrics = newMetricTable(100, time.Now())
+	createTxnMetrics(args, metrics)
+	expectMetrics(t, metrics, []internal.WantMetric{
+		{Name: backgroundName, Scope: "", Forced: true, Data: []float64{1, 123, 0, 123, 123, 123 * 123}},
+		{Name: backgroundRollup, Scope: "", Forced: true, Data: []float64{1, 123, 0, 123, 123, 123 * 123}},
+		{Name: "OtherTransactionTotalTime", Scope: "", Forced: true, Data: []float64{1, 150, 150, 150, 150, 150 * 150}},
+		{Name: "OtherTransactionTotalTime/zip/zap", Scope: "", Forced: false, Data: []float64{1, 150, 150, 150, 150, 150 * 150}},
+		{Name: "ErrorsExpected/all", Scope: "", Forced: true, Data: []float64{1, 0, 0, 0, 0, 0}},
+		{Name: "DurationByCaller/Unknown/Unknown/Unknown/Unknown/all", Scope: "", Forced: false, Data: []float64{1, 123, 123, 123, 123, 123 * 123}},
+		{Name: "DurationByCaller/Unknown/Unknown/Unknown/Unknown/allOther", Scope: "", Forced: false, Data: []float64{1, 123, 123, 123, 123, 123 * 123}},
+		{Name: "ErrorsByCaller/Unknown/Unknown/Unknown/Unknown/all", Scope: "", Forced: false, Data: []float64{1, 0, 0, 0, 0, 0}},
+		{Name: "ErrorsByCaller/Unknown/Unknown/Unknown/Unknown/allOther", Scope: "", Forced: false, Data: []float64{1, 0, 0, 0, 0, 0}},
+	})
+
 	args.FinalName = backgroundName
 	args.IsWeb = false
 	args.Errors = nil
+	args.noticeErrors = false
+	args.expectedErrors = false
 	args.Zone = apdexNone
 	metrics = newMetricTable(100, time.Now())
 	createTxnMetrics(args, metrics)
@@ -889,6 +918,7 @@ func TestCreateTxnMetricsOldCAT(t *testing.T) {
 	args.FinalName = webName
 	args.IsWeb = true
 	args.Errors = txnErrors
+	args.noticeErrors = true
 	args.Zone = apdexTolerating
 	metrics := newMetricTable(100, time.Now())
 	createTxnMetrics(args, metrics)
@@ -908,6 +938,7 @@ func TestCreateTxnMetricsOldCAT(t *testing.T) {
 	args.FinalName = webName
 	args.IsWeb = true
 	args.Errors = nil
+	args.noticeErrors = false
 	args.Zone = apdexTolerating
 	metrics = newMetricTable(100, time.Now())
 	createTxnMetrics(args, metrics)
@@ -924,6 +955,7 @@ func TestCreateTxnMetricsOldCAT(t *testing.T) {
 	args.FinalName = backgroundName
 	args.IsWeb = false
 	args.Errors = txnErrors
+	args.noticeErrors = true
 	args.Zone = apdexNone
 	metrics = newMetricTable(100, time.Now())
 	createTxnMetrics(args, metrics)
@@ -940,6 +972,7 @@ func TestCreateTxnMetricsOldCAT(t *testing.T) {
 	args.FinalName = backgroundName
 	args.IsWeb = false
 	args.Errors = nil
+	args.noticeErrors = false
 	args.Zone = apdexNone
 	metrics = newMetricTable(100, time.Now())
 	createTxnMetrics(args, metrics)
@@ -967,7 +1000,7 @@ func TestNewHarvestSetsDefaultValues(t *testing.T) {
 	if cp := h.ErrorEvents.capacity(); cp != internal.MaxErrorEvents {
 		t.Error("wrong error event capacity", cp)
 	}
-	if cp := h.SpanEvents.capacity(); cp != defaultMaxSpanEvents {
+	if cp := h.SpanEvents.capacity(); cp != internal.MaxSpanEvents {
 		t.Error("wrong span event capacity", cp)
 	}
 }

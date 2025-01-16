@@ -1,9 +1,12 @@
 package zerologWriter
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"strings"
+	"time"
+	"unicode"
 
 	"github.com/newrelic/go-agent/v3/integrations/logcontext-v2/nrwriter"
 	"github.com/newrelic/go-agent/v3/internal"
@@ -51,22 +54,41 @@ func parseJSONLogData(log []byte) newrelic.LogData {
 	// For this iteration of the tool, the entire log gets captured as the message
 	data := newrelic.LogData{}
 	data.Message = string(log)
+	data.Timestamp = time.Now().UnixMilli()
 
-	for i := 0; i < len(log)-1; {
+	i := skipPastSpaces(log, 0)
+	if i < 0 || i >= len(log) || log[i] != '{' {
+		return data
+	}
+	i++
+	for i < len(log)-1 {
 		// get key; always a string field
-		key, keyEnd := getStringField(log, i)
-
-		// find index where value starts
-		valStart := getValueIndex(log, keyEnd)
-		valEnd := valStart
+		key, valStart := getKey(log, i)
+		if valStart < 0 {
+			return data
+		}
+		var next int
 
 		// NOTE: depending on the key, the type of field the value is can differ
 		switch key {
 		case zerolog.LevelFieldName:
-			data.Severity, valEnd = getStringField(log, valStart)
+			data.Severity, next = getStringValue(log, valStart)
+		case zerolog.ErrorStackFieldName:
+			_, next = getStackTrace(log, valStart)
+		default:
+			if i >= len(log)-1 {
+				return data
+			}
+			// TODO: once we update the logging spec to support custom attributes, capture these
+			if isStringValue(log, valStart) {
+				_, next = getStringValue(log, valStart)
+			} else if isNumberValue(log, valStart) {
+				_, next = getNumberValue(log, valStart)
+			} else {
+				return data
+			}
 		}
 
-		next := nextKeyIndex(log, valEnd)
 		if next == -1 {
 			return data
 		}
@@ -76,49 +98,183 @@ func parseJSONLogData(log []byte) newrelic.LogData {
 	return data
 }
 
-func getValueIndex(p []byte, indx int) int {
-	// Find the index where the value begins
-	for i := indx; i < len(p)-1; i++ {
-		if p[i] == ':' {
-			return i + 1
-		}
+func isStringValue(p []byte, indx int) bool {
+	if indx = skipPastSpaces(p, indx); indx < 0 {
+		return false
 	}
-
-	return -1
+	return p[indx] == '"'
 }
 
-func nextKeyIndex(p []byte, indx int) int {
-	// Find the index where the key begins
-	for i := indx; i < len(p)-1; i++ {
-		if p[i] == ',' {
-			return i + 1
-		}
+func isNumberValue(p []byte, indx int) bool {
+	if indx = skipPastSpaces(p, indx); indx < 0 {
+		return false
 	}
-
-	return -1
+	// unicode.IsDigit isn't sufficient here because JSON numbers can start with a sign too
+	return unicode.IsDigit(rune(p[indx])) || p[indx] == '-'
 }
 
-func getStringField(p []byte, indx int) (string, int) {
+// zerolog keys are always JSON strings
+func getKey(p []byte, indx int) (string, int) {
 	value := strings.Builder{}
-	i := indx
-
-	// find start of string field
-	for ; i < len(p)-1; i++ {
-		if p[i] == '"' {
-			i += 1
-			break
-		}
+	i := skipPastSpaces(p, indx)
+	if i < 0 || i >= len(p) || p[i] != '"' {
+		return "", -1
 	}
 
 	// parse value of string field
-	for ; i < len(p)-1; i++ {
+	literalNext := false
+	for i++; i < len(p); i++ {
+		if literalNext {
+			value.WriteByte(p[i])
+			literalNext = false
+			continue
+		}
+
+		if p[i] == '\\' {
+			value.WriteByte(p[i])
+			literalNext = true
+			continue
+		}
+
 		if p[i] == '"' {
-			return value.String(), i + 1
+			// found end of key. Now look for the colon separator
+			for i++; i < len(p); i++ {
+				if p[i] == ':' && i+1 < len(p) {
+					return value.String(), i + 1
+				}
+				if p[i] != ' ' && p[i] != '\t' {
+					break
+				}
+			}
+			// Oh oh. if we got here, there wasn't a colon, or there wasn't a value after it, or
+			// something showed up between the end of the key and the colon that wasn't a space.
+			// In any of those cases, we didn't find the key of a key/value pair.
+			return "", -1
 		} else {
 			value.WriteByte(p[i])
 		}
+	}
+	return "", -1
+}
 
+/*
+func isEOL(p []byte, i int) bool {
+	for ; i < len(p); i++ {
+		if p[i] == ' ' || p[i] == '\t' {
+			continue
+		}
+		if p[i] == '}' {
+			// nothing but space to the end from here?
+			for i++; i < len(p); i++ {
+				if p[i] != ' ' && p[i] != '\t' && p[i] != '\r' && p[i] != '\n' {
+					return false // nope, that wasn't the end of the string
+				}
+			}
+			return true
+		}
+	}
+	return false
+}
+*/
+
+func skipPastSpaces(p []byte, i int) int {
+	for ; i < len(p); i++ {
+		if p[i] != ' ' && p[i] != '\t' && p[i] != '\r' && p[i] != '\n' {
+			return i
+		}
+	}
+	return -1
+}
+
+func getStringValue(p []byte, indx int) (string, int) {
+	value := strings.Builder{}
+
+	// skip to start of string
+	i := skipPastSpaces(p, indx)
+	if i < 0 || i >= len(p) || p[i] != '"' {
+		return "", -1
+	}
+
+	// parse value of string field
+	literalNext := false
+	for i++; i < len(p); i++ {
+		if literalNext {
+			value.WriteByte(p[i])
+			literalNext = false
+			continue
+		}
+
+		if p[i] == '\\' {
+			value.WriteByte(p[i])
+			literalNext = true
+			continue
+		}
+
+		if p[i] == '"' {
+			// end of string. search past the comma so we can find the following key (if any) later.
+			if i = skipPastSpaces(p, i+1); i < 0 || i >= len(p) {
+				return value.String(), -1
+			}
+			if p[i] == ',' {
+				if i+1 < len(p) {
+					return value.String(), i + 1
+				}
+				return value.String(), -1
+			}
+			return value.String(), -1
+		}
+
+		value.WriteByte(p[i])
 	}
 
 	return "", -1
+}
+
+func getNumberValue(p []byte, indx int) (string, int) {
+	value := strings.Builder{}
+
+	// parse value of string field
+	i := skipPastSpaces(p, indx)
+	if i < 0 {
+		return "", -1
+	}
+	// JSON numeric values contain digits, '.', '-', 'e'
+	for ; i < len(p) && bytes.IndexByte([]byte("0123456789-+eE."), p[i]) >= 0; i++ {
+		value.WriteByte(p[i])
+	}
+
+	i = skipPastSpaces(p, i)
+	if i > 0 && i+1 < len(p) && p[i] == ',' {
+		return value.String(), i + 1
+	}
+	return value.String(), -1
+}
+
+func getStackTrace(p []byte, indx int) (string, int) {
+	value := strings.Builder{}
+
+	i := skipPastSpaces(p, indx)
+	if i < 0 || i >= len(p) || p[i] != '[' {
+		return "", -1
+	}
+	// the stack trace is everything from '[' to the next ']'.
+	// TODO: this is a little naïve and we may need to consider parsing
+	// the data inbetween more carefully. To date, we haven't seen a case
+	// where that is necessary, and prefer not to impact performance of the
+	// system by doing the extra processing, but we can revisit that later
+	// if necessary.
+	for ; i < len(p); i++ {
+		if p[i] == ']' {
+			value.WriteByte(p[i])
+			i = skipPastSpaces(p, i)
+			if i > 0 && i+1 < len(p) && p[i] == ',' {
+				return value.String(), i + 1
+			}
+			return value.String(), -1
+		} else {
+			value.WriteByte(p[i])
+		}
+	}
+
+	return value.String(), -1
 }

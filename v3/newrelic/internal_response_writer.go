@@ -29,7 +29,9 @@ func (rw *replacementResponseWriter) Write(b []byte) (n int, err error) {
 	n, err = rw.original.Write(b)
 
 	headersJustWritten(rw.thd, http.StatusOK, hdr)
-
+	if IsSecurityAgentPresent() {
+		secureAgent.SendEvent("INBOUND_WRITE", string(b), hdr, rw.thd.GetLinkingMetadata().TraceID)
+	}
 	return
 }
 
@@ -41,6 +43,9 @@ func (rw *replacementResponseWriter) WriteHeader(code int) {
 	rw.original.WriteHeader(code)
 
 	headersJustWritten(rw.thd, code, hdr)
+	if IsSecurityAgentPresent() {
+		secureAgent.SendEvent("INBOUND_RESPONSE_CODE", code)
+	}
 }
 
 func (rw *replacementResponseWriter) CloseNotify() <-chan bool {
